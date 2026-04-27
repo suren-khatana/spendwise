@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+*.md
+sample-bank-stmts
+requirements
+.github
