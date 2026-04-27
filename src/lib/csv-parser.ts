@@ -5,7 +5,6 @@ type BankFormat = 'S-Pankki' | 'Nordea FI' | 'Nordea EN' | 'Credit Card' | 'OP B
 interface FormatConfig {
   name: BankFormat;
   separator: string;
-  quoted: boolean;
   dateCol: number;
   amountCol: number;
   descriptionCols: number[];
@@ -19,6 +18,14 @@ interface FormatConfig {
   // exclusion to match legitimate vendor payments paid via SEPA transfer).
   // When omitted, `searchableText` is the entire raw line.
   searchableTextExcludeCols?: number[];
+}
+
+// Strip a single pair of outer double-quotes from a field. No-op if the field
+// isn't quoted, so it's safe to apply universally — banks export the same
+// schema with or without quote-wrapping (OP Bank does both; Credit Card
+// quotes data rows but not the header).
+function stripOuterQuotes(field: string): string {
+  return field.replace(/^"(.*)"$/, '$1');
 }
 
 function parseDDMMYYYY(raw: string): string {
@@ -36,7 +43,15 @@ function parseDMYYYY(raw: string): string {
   return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
 }
 
-function parseDDslashMMslashYYYY(raw: string): string {
+// OP Bank exports dates in two formats depending on the user's locale/export
+// settings, on the same schema:
+//   - DD/MM/YYYY  (e.g., "01/09/2025")
+//   - YYYY-MM-DD  (e.g., "2025-09-01" — already ISO)
+function parseOPBankDate(raw: string): string {
+  if (raw.includes('-')) {
+    const [year, month, day] = raw.split('-');
+    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+  }
   const [day, month, year] = raw.split('/');
   return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
 }
@@ -52,11 +67,14 @@ function parseDotAmount(raw: string): number {
 }
 
 function detectFormat(header: string): FormatConfig | null {
-  if (header.startsWith('Kirjauspäivä;Maksupäivä;Summa')) {
+  // Normalize: strip outer quotes from each header field so the same prefix
+  // matches both quoted and unquoted exports of the same schema.
+  const normalized = header.split(';').map(stripOuterQuotes).join(';');
+
+  if (normalized.startsWith('Kirjauspäivä;Maksupäivä;Summa')) {
     return {
       name: 'S-Pankki',
       separator: ';',
-      quoted: false,
       dateCol: 0,
       amountCol: 2,
       descriptionCols: [5, 4],
@@ -67,11 +85,10 @@ function detectFormat(header: string): FormatConfig | null {
     };
   }
 
-  if (header.startsWith('Kirjauspäivä;Määrä;Maksaja')) {
+  if (normalized.startsWith('Kirjauspäivä;Määrä;Maksaja')) {
     return {
       name: 'Nordea FI',
       separator: ';',
-      quoted: false,
       dateCol: 0,
       amountCol: 1,
       descriptionCols: [4, 5],
@@ -80,11 +97,10 @@ function detectFormat(header: string): FormatConfig | null {
     };
   }
 
-  if (header.startsWith('Booking date;Amount;Sender')) {
+  if (normalized.startsWith('Booking date;Amount;Sender')) {
     return {
       name: 'Nordea EN',
       separator: ';',
-      quoted: false,
       dateCol: 0,
       amountCol: 1,
       descriptionCols: [4, 5],
@@ -93,11 +109,10 @@ function detectFormat(header: string): FormatConfig | null {
     };
   }
 
-  if (header.startsWith('Kirjauspäivä;Arvopäivä;Määrä EUROA')) {
+  if (normalized.startsWith('Kirjauspäivä;Arvopäivä;Määrä EUROA')) {
     return {
       name: 'OP Bank',
       separator: ';',
-      quoted: false,
       dateCol: 0,
       amountCol: 2,
       // Col 5 is Saaja/Maksaja (counterparty name). Col 4 (Selitys) holds the
@@ -106,16 +121,15 @@ function detectFormat(header: string): FormatConfig | null {
       // searchableTextExcludeCols below for why.
       descriptionCols: [5],
       searchableTextExcludeCols: [4],
-      dateParser: parseDDslashMMslashYYYY,
+      dateParser: parseOPBankDate,
       amountParser: parseCommaAmount,
     };
   }
 
-  if (header.startsWith('Transaction date;Booking date;Title;Amount')) {
+  if (normalized.startsWith('Transaction date;Booking date;Title;Amount')) {
     return {
       name: 'Credit Card',
       separator: ';',
-      quoted: true,
       dateCol: 0,
       amountCol: 3,
       descriptionCols: [2],
@@ -127,12 +141,10 @@ function detectFormat(header: string): FormatConfig | null {
   return null;
 }
 
-function splitFields(line: string, separator: string, quoted: boolean): string[] {
-  const fields = line.split(separator);
-  if (quoted) {
-    return fields.map((f) => f.replace(/^"|"$/g, ''));
-  }
-  return fields;
+function splitFields(line: string, separator: string): string[] {
+  // Strip outer quotes universally — no-op for unquoted fields, correct for
+  // quoted ones. See stripOuterQuotes for the rationale.
+  return line.split(separator).map(stripOuterQuotes);
 }
 
 export function parse(rawCsv: string, fileName = ''): ImportResult {
@@ -164,40 +176,54 @@ export function parse(rawCsv: string, fileName = ''): ImportResult {
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
-    const fields = splitFields(line, format.separator, format.quoted);
 
-    const rawDate = fields[format.dateCol]?.trim() ?? '';
-    const rawAmount = fields[format.amountCol]?.trim() ?? '';
+    // A malformed row (bad date, missing column, NaN amount) should not crash
+    // the whole import — skip it with a per-line error so the user can see
+    // exactly which rows were dropped instead of losing their entire upload.
+    try {
+      const fields = splitFields(line, format.separator);
 
-    if (!rawDate || !rawAmount) continue;
+      const rawDate = fields[format.dateCol]?.trim() ?? '';
+      const rawAmount = fields[format.amountCol]?.trim() ?? '';
 
-    const date = format.dateParser(rawDate);
-    const amount = format.amountParser(rawAmount);
+      if (!rawDate || !rawAmount) continue;
 
-    const descParts = format.descriptionCols
-      .map((col) => fields[col]?.trim() ?? '')
-      .filter(Boolean);
-    const uniqueParts = descParts.filter(
-      (part, idx) => descParts.indexOf(part) === idx,
-    );
-    const description = format.descriptionFormatter
-      ? format.descriptionFormatter(uniqueParts)
-      : uniqueParts.join(' ');
+      const date = format.dateParser(rawDate);
+      const amount = format.amountParser(rawAmount);
 
-    const excludes = format.searchableTextExcludeCols;
-    const searchableText = excludes
-      ? fields.filter((_, i) => !excludes.includes(i)).join(format.separator)
-      : line;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(amount)) {
+        result.errors.push(`Line ${i + 1}: could not parse date "${rawDate}" or amount "${rawAmount}"`);
+        continue;
+      }
 
-    const transaction: Transaction = {
-      date,
-      amount,
-      description,
-      searchableText,
-      source: format.name,
-    };
+      const descParts = format.descriptionCols
+        .map((col) => fields[col]?.trim() ?? '')
+        .filter(Boolean);
+      const uniqueParts = descParts.filter(
+        (part, idx) => descParts.indexOf(part) === idx,
+      );
+      const description = format.descriptionFormatter
+        ? format.descriptionFormatter(uniqueParts)
+        : uniqueParts.join(' ');
 
-    result.transactions.push(transaction);
+      const excludes = format.searchableTextExcludeCols;
+      const searchableText = excludes
+        ? fields.filter((_, idx) => !excludes.includes(idx)).join(format.separator)
+        : line;
+
+      const transaction: Transaction = {
+        date,
+        amount,
+        description,
+        searchableText,
+        source: format.name,
+      };
+
+      result.transactions.push(transaction);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      result.errors.push(`Line ${i + 1}: ${message}`);
+    }
   }
 
   return result;

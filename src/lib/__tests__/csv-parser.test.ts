@@ -192,6 +192,75 @@ describe('csv-parser', () => {
     });
   });
 
+  describe('Profile 5 - OP Bank (quoted variant)', () => {
+    // OP Bank also exports the same schema with every field wrapped in
+    // double-quotes. Detection and parsing must work identically.
+    const csv = `"Kirjauspäivä";"Arvopäivä";"Määrä EUROA";"Laji";"Selitys";"Saaja/Maksaja";"Saajan tilinumero";"Saajan pankin BIC";"Viite";"Viesti";"Arkistointitunnus"
+"01/09/2025";"01/09/2025";"-180";"106";"TILISIIRTO";"Paytrail Oyj EnterFinland";"FI2650000120480743";"OKOYFIHH";"ref=00000000008533672237";"Lopullinen saaja: Maahanmuuttovirasto";"20250901/598479/043198"
+"02/09/2025";"02/09/2025";"-35,53";"129";"MAKSUPALVELU";"Keskinäinen Eläkevakuutusyhtiö";"FI4350000120244339";"OKOYFIHH";"ref=00000082000100121111";"";"20250722/5FVT00/088095"`;
+
+    it('detects OP Bank format despite quoted header fields', () => {
+      const result = parse(csv, 'op-bank2_fi.csv');
+      expect(result.bankFormat).toBe('OP Bank');
+      expect(result.transactions).toHaveLength(2);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('parses dates and amounts from quoted fields identically to unquoted', () => {
+      const result = parse(csv);
+      expect(result.transactions[0].date).toBe('2025-09-01');
+      expect(result.transactions[0].amount).toBe(-180);
+      expect(result.transactions[1].date).toBe('2025-09-02');
+      expect(result.transactions[1].amount).toBe(-35.53);
+    });
+
+    it('strips quotes from description', () => {
+      const result = parse(csv);
+      expect(result.transactions[0].description).toBe('Paytrail Oyj EnterFinland');
+      expect(result.transactions[0].description).not.toContain('"');
+    });
+  });
+
+  describe('Profile 5 - OP Bank (ISO date variant)', () => {
+    // Real-world OP Bank export with YYYY-MM-DD dates (some users get this
+    // depending on locale settings) and mixed quoting where numeric fields
+    // come through unquoted between quoted text fields.
+    const csv = `"Kirjauspäivä";"Arvopäivä";"Määrä EUROA";"Laji";"Selitys";"Saaja/Maksaja";"Saajan tilinumero";"Saajan pankin BIC";"Viite";"Viesti";"Arkistointitunnus"
+"2025-08-01";"2025-08-01";-226,42;"129";"MAKSUPALVELU";"Keskinäinen Vakuutusyhtiö Fenn";"FI9650000110031613";"OKOYFIHH";"ref=10265594525466160436";"";"20250702/5FVT00/285645"
+"2025-08-25";"2025-08-25";3695,18;"506";"TILISIIRTO";"ACCENTURE TECHNOLOGY SOLUTIONS OY";"FI9350920920513569";"";"ref=";"Viesti: SALARY";"20250823/5SCT5Y/002436"`;
+
+    it('parses ISO-format dates without crashing', () => {
+      const result = parse(csv, 'op-bank2_fi.csv');
+      expect(result.bankFormat).toBe('OP Bank');
+      expect(result.transactions).toHaveLength(2);
+      expect(result.errors).toHaveLength(0);
+      expect(result.transactions[0].date).toBe('2025-08-01');
+      expect(result.transactions[1].date).toBe('2025-08-25');
+    });
+
+    it('handles mixed quoting (text fields quoted, numeric fields unquoted)', () => {
+      const result = parse(csv);
+      expect(result.transactions[0].amount).toBe(-226.42);
+      expect(result.transactions[1].amount).toBe(3695.18);
+    });
+  });
+
+  describe('Per-row error handling', () => {
+    it('does not crash the whole import when a single row has a malformed date', () => {
+      const csv = `Kirjauspäivä;Arvopäivä;Määrä EUROA;Laji;Selitys;Saaja/Maksaja;Saajan tilinumero;Saajan pankin BIC;Viite;Viesti;Arkistointitunnus
+01/09/2025;01/09/2025;-100;106;TILISIIRTO;Vendor A;FI11;BIC1;ref=1;;archive1
+NOT-A-DATE;01/09/2025;-200;106;TILISIIRTO;Vendor B;FI22;BIC2;ref=2;;archive2
+03/09/2025;03/09/2025;-300;106;TILISIIRTO;Vendor C;FI33;BIC3;ref=3;;archive3`;
+      const result = parse(csv);
+      // Two valid rows are preserved; the bad row is reported but skipped.
+      expect(result.transactions).toHaveLength(2);
+      expect(result.transactions[0].description).toBe('Vendor A');
+      expect(result.transactions[1].description).toBe('Vendor C');
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.errors[0]).toContain('Line 3');
+    });
+  });
+
   describe('BOM handling', () => {
     it('strips UTF-8 BOM from beginning of file', () => {
       const csv = `\uFEFFKirjauspäivä;Maksupäivä;Summa;Tapahtumalaji;Maksaja;Saajan nimi;Saajan tilinumero;Saajan BIC-tunnus;Viitenumero;Viesti;Arkistointitunnus
