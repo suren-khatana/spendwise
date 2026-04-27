@@ -97,4 +97,102 @@ describe('category-engine', () => {
     const result = categorize(txs, defaults);
     expect(result[0].category).toBe('Rent');
   });
+
+  describe('cross-source pair reclassification (credit-card double-count fix)', () => {
+    it('reclassifies a bank/CC payment pair as Exclusions even though neither matches an Exclusion keyword', () => {
+      // Real-world shape: Nordea bank statement has a -627.33 CC settlement
+      // (no Exclusion keyword in its searchableText), and the credit card
+      // statement has a corresponding +627.33 "Payment" row on the same date.
+      const txs = [
+        makeTx({
+          date: '2026-03-05',
+          amount: -627.33,
+          searchableText: 'Nordea Bank Abp FI6085793653525957 371861682652992F1889',
+          source: 'Nordea EN',
+        }),
+        makeTx({
+          date: '2026-03-05',
+          amount: 627.33,
+          searchableText: 'Payment 05.03',
+          source: 'Credit Card',
+        }),
+      ];
+      const result = categorize(txs, defaults);
+      expect(result[0].category).toBe('Exclusions');
+      expect(result[1].category).toBe('Exclusions');
+    });
+
+    it('does not flag opposing-sign pairs from the same source', () => {
+      // Two same-day same-|amount| opposing-sign rows from the same statement
+      // (e.g. an internal transfer + immediate reversal) should keep their
+      // keyword-derived categories — there's no payment relationship across
+      // sources here.
+      const txs = [
+        makeTx({
+          date: '2026-03-05',
+          amount: -100,
+          searchableText: 'some vendor',
+          source: 'Nordea EN',
+        }),
+        makeTx({
+          date: '2026-03-05',
+          amount: 100,
+          searchableText: 'some vendor refund',
+          source: 'Nordea EN',
+        }),
+      ];
+      const result = categorize(txs, defaults);
+      expect(result[0].category).not.toBe('Exclusions');
+      expect(result[1].category).not.toBe('Exclusions');
+    });
+
+    it('does not flag same-sign pairs across sources', () => {
+      // A bank -50 and a CC -50 on the same date are both real expenses,
+      // not a payment relationship. They must remain in their normal
+      // keyword-derived categories.
+      const txs = [
+        makeTx({
+          date: '2026-03-05',
+          amount: -50,
+          searchableText: 'LIDL HELSINKI',
+          source: 'Nordea EN',
+        }),
+        makeTx({
+          date: '2026-03-05',
+          amount: -50,
+          searchableText: 'PRISMA HELSINKI',
+          source: 'Credit Card',
+        }),
+      ];
+      const result = categorize(txs, defaults);
+      expect(result[0].category).toBe('Supermarket');
+      expect(result[1].category).toBe('Supermarket');
+    });
+
+    it('reclassifies all members of a 3-tx cross-source group with opposing signs', () => {
+      const txs = [
+        makeTx({ date: '2026-03-05', amount: -300, searchableText: 'a', source: 'Nordea EN' }),
+        makeTx({ date: '2026-03-05', amount: 300, searchableText: 'b', source: 'Credit Card' }),
+        makeTx({ date: '2026-03-05', amount: -300, searchableText: 'c', source: 'S-Pankki' }),
+      ];
+      const result = categorize(txs, defaults);
+      expect(result[0].category).toBe('Exclusions');
+      expect(result[1].category).toBe('Exclusions');
+      expect(result[2].category).toBe('Exclusions');
+    });
+
+    it('is a no-op when no cross-source pairs exist (regression guard)', () => {
+      // Single-source dataset — every keyword categorization should be
+      // identical to before the cross-source pass was added.
+      const txs = [
+        makeTx({ date: '2026-03-05', amount: -50, searchableText: 'LIDL', source: 'Nordea EN' }),
+        makeTx({ date: '2026-03-06', amount: -100, searchableText: 'TELIA bill', source: 'Nordea EN' }),
+        makeTx({ date: '2026-03-07', amount: 5000, searchableText: 'Payroll', source: 'Nordea EN' }),
+      ];
+      const result = categorize(txs, defaults);
+      expect(result[0].category).toBe('Supermarket');
+      expect(result[1].category).toBe('Utilities');
+      expect(result[2].category).toBe('Income');
+    });
+  });
 });

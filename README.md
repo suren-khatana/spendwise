@@ -58,7 +58,7 @@ Open **http://localhost:8080**. The container serves the production build via Ng
 | S-Pankki | Finnish | DD.MM.YYYY | `Kirjauspäivä;Maksupäivä;Summa` |
 | Nordea | Finnish | YYYY/MM/DD | `Kirjauspäivä;Määrä;Maksaja` |
 | Nordea | English | YYYY/MM/DD | `Booking date;Amount;Sender` |
-| OP Bank | Finnish | DD/MM/YYYY | `Kirjauspäivä;Arvopäivä;Määrä EUROA` |
+| OP Bank | Finnish | DD/MM/YYYY or YYYY-MM-DD | `Kirjauspäivä;Arvopäivä;Määrä EUROA` |
 | Nordea Credit Card | English | DD.M.YYYY | `Transaction date;Booking date;Title;Amount` |
 
 
